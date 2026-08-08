@@ -1,185 +1,197 @@
-import Database from 'better-sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import pg from 'pg';
 import bcrypt from 'bcryptjs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const { Pool } = pg;
 
-// Initialize DB file
-const dbPath = process.env.DATABASE_PATH || path.resolve(__dirname, 'melo.db');
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL'); // High concurrency performance optimization
+// Load DB connection string from env
+const connectionString = process.env.DATABASE_URL;
 
-export function initDatabase() {
+if (!connectionString) {
+    console.error("CRITICAL ERROR: DATABASE_URL environment variable is missing!");
+}
+
+export const pool = new Pool({
+    connectionString,
+    ssl: connectionString && !connectionString.includes('localhost') ? {
+        rejectUnauthorized: false // Required for hosted databases (Supabase/Neon)
+    } : false
+});
+
+export async function query(text, params) {
+    return pool.query(text, params);
+}
+
+export async function initDatabase() {
+    if (!connectionString) return;
+
     // 1. Create Users Table
-    db.prepare(`
+    await query(`
         CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            phone TEXT,
-            email TEXT,
-            password_hash TEXT,
-            name TEXT NOT NULL,
-            username TEXT UNIQUE NOT NULL,
+            id VARCHAR(255) PRIMARY KEY,
+            phone VARCHAR(50),
+            email VARCHAR(255),
+            password_hash VARCHAR(255),
+            name VARCHAR(255) NOT NULL,
+            username VARCHAR(255) UNIQUE NOT NULL,
             avatar TEXT,
             bio TEXT,
             interests TEXT, -- JSON Array
             languages TEXT, -- JSON Array
-            city TEXT,
-            dob TEXT,
-            gender TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            city VARCHAR(255),
+            dob VARCHAR(50),
+            gender VARCHAR(50),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    `).run();
+    `);
 
     // 2. Create Gatherings Table
-    db.prepare(`
+    await query(`
         CREATE TABLE IF NOT EXISTS gatherings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
             description TEXT NOT NULL,
-            category TEXT NOT NULL,
-            date TEXT NOT NULL,
-            time TEXT NOT NULL,
-            endTime TEXT,
-            venue TEXT NOT NULL,
-            location TEXT NOT NULL,
-            maxAttendees INTEGER NOT NULL,
-            public INTEGER DEFAULT 1, -- boolean 1/0
-            ageRestriction TEXT,
-            dressCode TEXT,
-            itemsToBring TEXT,
+            category VARCHAR(255) NOT NULL,
+            date VARCHAR(50) NOT NULL,
+            time VARCHAR(50) NOT NULL,
+            "endTime" VARCHAR(50),
+            venue VARCHAR(255) NOT NULL,
+            location VARCHAR(255) NOT NULL,
+            "maxAttendees" INTEGER NOT NULL,
+            public INTEGER DEFAULT 1,
+            "ageRestriction" VARCHAR(255),
+            "dressCode" VARCHAR(255),
+            "itemsToBring" TEXT,
             rules TEXT,
-            coverImage TEXT,
+            "coverImage" TEXT,
             tags TEXT, -- JSON Array
-            status TEXT DEFAULT 'active', -- active, completed
-            hostId TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(hostId) REFERENCES users(id) ON DELETE CASCADE
+            status VARCHAR(50) DEFAULT 'active',
+            "hostId" VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY("hostId") REFERENCES users(id) ON DELETE CASCADE
         )
-    `).run();
+    `);
 
-    // 3. Create Attendees Join Table
-    db.prepare(`
+    // 3. Create Attendees Table
+    await query(`
         CREATE TABLE IF NOT EXISTS attendees (
             gathering_id INTEGER,
-            user_id TEXT,
-            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            user_id VARCHAR(255),
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (gathering_id, user_id),
             FOREIGN KEY(gathering_id) REFERENCES gatherings(id) ON DELETE CASCADE,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    `).run();
+    `);
 
     // 4. Create Join Requests Table
-    db.prepare(`
+    await query(`
         CREATE TABLE IF NOT EXISTS join_requests (
             gathering_id INTEGER,
-            user_id TEXT,
-            status TEXT DEFAULT 'pending', -- pending, approved, rejected
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            user_id VARCHAR(255),
+            status VARCHAR(50) DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (gathering_id, user_id),
             FOREIGN KEY(gathering_id) REFERENCES gatherings(id) ON DELETE CASCADE,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    `).run();
+    `);
 
     // 5. Create Messages Table
-    db.prepare(`
+    await query(`
         CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender_id TEXT NOT NULL,
-            receiver_id TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            sender_id VARCHAR(255) NOT NULL,
+            receiver_id VARCHAR(255) NOT NULL,
             text TEXT NOT NULL,
             image_url TEXT,
-            timestamp TEXT NOT NULL,
+            timestamp VARCHAR(50) NOT NULL,
             is_read INTEGER DEFAULT 0,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY(receiver_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    `).run();
+    `);
 
     // 6. Create Comments Table
-    db.prepare(`
+    await query(`
         CREATE TABLE IF NOT EXISTS comments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             gathering_id INTEGER NOT NULL,
-            user_id TEXT NOT NULL,
+            user_id VARCHAR(255) NOT NULL,
             text TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(gathering_id) REFERENCES gatherings(id) ON DELETE CASCADE,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    `).run();
+    `);
 
     // 7. Create Notifications Table
-    db.prepare(`
+    await query(`
         CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            type TEXT NOT NULL,
-            title TEXT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            user_id VARCHAR(255) NOT NULL,
+            type VARCHAR(50) NOT NULL,
+            title VARCHAR(255) NOT NULL,
             message TEXT NOT NULL,
             read INTEGER DEFAULT 0,
-            time TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            time VARCHAR(50),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    `).run();
+    `);
 
     // 8. Create Saved Gatherings
-    db.prepare(`
+    await query(`
         CREATE TABLE IF NOT EXISTS saved_gatherings (
-            user_id TEXT,
+            user_id VARCHAR(255),
             gathering_id INTEGER,
             PRIMARY KEY (user_id, gathering_id),
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY(gathering_id) REFERENCES gatherings(id) ON DELETE CASCADE
         )
-    `).run();
+    `);
 
     // 9. Create Blocks Table
-    db.prepare(`
+    await query(`
         CREATE TABLE IF NOT EXISTS blocks (
-            blocker_id TEXT,
-            blocked_id TEXT,
+            blocker_id VARCHAR(255),
+            blocked_id VARCHAR(255),
             PRIMARY KEY (blocker_id, blocked_id),
             FOREIGN KEY(blocker_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY(blocked_id) REFERENCES users(id) ON DELETE CASCADE
         )
-    `).run();
+    `);
 
     // 10. Create Reports Table
-    db.prepare(`
+    await query(`
         CREATE TABLE IF NOT EXISTS reports (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            reporter_id TEXT,
-            reported_type TEXT, -- user, gathering
-            reported_id TEXT,
-            reason TEXT,
+            id SERIAL PRIMARY KEY,
+            reporter_id VARCHAR(255),
+            reported_type VARCHAR(50),
+            reported_id VARCHAR(255),
+            reason VARCHAR(255),
             details TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    `).run();
+    `);
 
-    // Create Indexes for ultra-fast searches
-    db.prepare(`CREATE INDEX IF NOT EXISTS idx_gatherings_host ON gatherings(hostId)`).run();
-    db.prepare(`CREATE INDEX IF NOT EXISTS idx_gatherings_status ON gatherings(status)`).run();
-    db.prepare(`CREATE INDEX IF NOT EXISTS idx_messages_sender_receiver ON messages(sender_id, receiver_id)`).run();
-    db.prepare(`CREATE INDEX IF NOT EXISTS idx_comments_gathering ON comments(gathering_id)`).run();
-    db.prepare(`CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read)`).run();
+    // Create Indexes
+    await query(`CREATE INDEX IF NOT EXISTS idx_gatherings_host ON gatherings("hostId")`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_gatherings_status ON gatherings(status)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_messages_sender_receiver ON messages(sender_id, receiver_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_comments_gathering ON comments(gathering_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, read)`);
 
     // Seed Data
-    seedDatabase();
+    await seedDatabase();
 }
 
-function seedDatabase() {
-    // Check if seeded
-    const userCount = db.prepare('SELECT count(*) as count FROM users').get().count;
+async function seedDatabase() {
+    const userRes = await query('SELECT count(*) as count FROM users');
+    const userCount = parseInt(userRes.rows[0].count);
     if (userCount > 0) return;
 
-    console.log('Seeding initial Melo database...');
+    console.log('Seeding initial database tables on PostgreSQL...');
 
     const passHash = bcrypt.hashSync('melo1234', 10);
 
@@ -242,13 +254,11 @@ function seedDatabase() {
         }
     ];
 
-    const insertUser = db.prepare(`
-        INSERT INTO users (id, phone, email, password_hash, name, username, avatar, bio, interests, languages, city, dob, gender)
-        VALUES (@id, @phone, @email, '${passHash}', @name, @username, @avatar, @bio, @interests, @languages, @city, @dob, @gender)
-    `);
-
     for (const u of initialUsers) {
-        insertUser.run(u);
+        await query(`
+            INSERT INTO users (id, phone, email, password_hash, name, username, avatar, bio, interests, languages, city, dob, gender)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        `, [u.id, u.phone, u.email, passHash, u.name, u.username, u.avatar, u.bio, u.interests, u.languages, u.city, u.dob, u.gender]);
     }
 
     const initialGatherings = [
@@ -334,28 +344,26 @@ function seedDatabase() {
         }
     ];
 
-    const insertGathering = db.prepare(`
-        INSERT INTO gatherings (title, description, category, date, time, endTime, venue, location, maxAttendees, public, ageRestriction, dressCode, itemsToBring, rules, coverImage, tags, hostId, status)
-        VALUES (@title, @description, @category, @date, @time, @endTime, @venue, @location, @maxAttendees, @public, @ageRestriction, @dressCode, @itemsToBring, @rules, @coverImage, @tags, @hostId, @status)
-    `);
-
     for (const g of initialGatherings) {
-        insertGathering.run(g);
+        await query(`
+            INSERT INTO gatherings (title, description, category, date, time, "endTime", venue, location, "maxAttendees", public, "ageRestriction", "dressCode", "itemsToBring", rules, "coverImage", tags, "hostId", status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        `, [g.title, g.description, g.category, g.date, g.time, g.endTime, g.venue, g.location, g.maxAttendees, g.public, g.ageRestriction, g.dressCode, g.itemsToBring, g.rules, g.coverImage, g.tags, g.hostId, g.status]);
     }
 
     // Seed Attendees
-    db.prepare("INSERT INTO attendees (gathering_id, user_id) VALUES (1, 'host_john')").run();
-    db.prepare("INSERT INTO attendees (gathering_id, user_id) VALUES (1, 'guest_carlos')").run();
+    await query("INSERT INTO attendees (gathering_id, user_id) VALUES (1, 'host_john')");
+    await query("INSERT INTO attendees (gathering_id, user_id) VALUES (1, 'guest_carlos')");
 
-    db.prepare("INSERT INTO attendees (gathering_id, user_id) VALUES (2, 'host_sarah')").run();
-    db.prepare("INSERT INTO attendees (gathering_id, user_id) VALUES (2, 'guest_emily')").run();
+    await query("INSERT INTO attendees (gathering_id, user_id) VALUES (2, 'host_sarah')");
+    await query("INSERT INTO attendees (gathering_id, user_id) VALUES (2, 'guest_emily')");
 
-    db.prepare("INSERT INTO attendees (gathering_id, user_id) VALUES (3, 'host_sarah')").run();
-    db.prepare("INSERT INTO attendees (gathering_id, user_id) VALUES (3, 'host_john')").run();
-    db.prepare("INSERT INTO attendees (gathering_id, user_id) VALUES (3, 'guest_emily')").run();
+    await query("INSERT INTO attendees (gathering_id, user_id) VALUES (3, 'host_sarah')");
+    await query("INSERT INTO attendees (gathering_id, user_id) VALUES (3, 'host_john')");
+    await query("INSERT INTO attendees (gathering_id, user_id) VALUES (3, 'guest_emily')");
 
-    db.prepare("INSERT INTO attendees (gathering_id, user_id) VALUES (4, 'guest_carlos')").run();
-    db.prepare("INSERT INTO attendees (gathering_id, user_id) VALUES (4, 'host_john')").run();
+    await query("INSERT INTO attendees (gathering_id, user_id) VALUES (4, 'guest_carlos')");
+    await query("INSERT INTO attendees (gathering_id, user_id) VALUES (4, 'host_john')");
 
     // Seed Messages
     const initialMessages = [
@@ -364,27 +372,24 @@ function seedDatabase() {
         { sender: "guest_carlos", receiver: "host_john", text: "Got it! I will pick up a nice Pinot Noir.", timestamp: "18:20" }
     ];
 
-    const insertMsg = db.prepare(`
-        INSERT INTO messages (sender_id, receiver_id, text, timestamp, is_read)
-        VALUES (@sender, @receiver, @text, @timestamp, 1)
-    `);
     for (const m of initialMessages) {
-        insertMsg.run(m);
+        await query(`
+            INSERT INTO messages (sender_id, receiver_id, text, timestamp, is_read)
+            VALUES ($1, $2, $3, $4, 1)
+        `, [m.sender, m.receiver, m.text, m.timestamp]);
     }
 
     // Seed Comments
-    db.prepare(`
+    await query(`
         INSERT INTO comments (gathering_id, user_id, text)
         VALUES (1, 'guest_carlos', 'Can''t wait for this! John''s home-cooked pasta is legendary.')
-    `).run();
+    `);
 
     // Seed Notifications
-    db.prepare(`
+    await query(`
         INSERT INTO notifications (user_id, type, title, message, read, time)
         VALUES ('guest_emily', 'reminder', 'Upcoming Event', 'Retro Console Board Games & Pizza starts tomorrow at 19:00!', 0, '1 hour ago')
-    `).run();
+    `);
 
-    console.log('Seed database initialized successfully!');
+    console.log('PostgreSQL database seeded successfully!');
 }
-
-export default db;

@@ -1,12 +1,12 @@
 import express from 'express';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import db, { initDatabase } from './database.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { query, initDatabase } from './database.js';
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = 'melo_secret_token_key_2026';
@@ -15,12 +15,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const clientDistPath = path.resolve(__dirname, '../dist');
 
-// Initialize SQLite tables
-initDatabase();
+// Initialize database tables
+initDatabase().catch(err => {
+    console.error("Database initialization failed:", err);
+});
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '10mb' })); // Support base64 image uploads
+app.use(express.json({ limit: '10mb' }));
 app.use(express.static(clientDistPath));
 
 const server = http.createServer(app);
@@ -49,57 +51,67 @@ function authenticateToken(req, res, next) {
 // AUTH ENDPOINTS
 // ----------------------------------------------------
 
-app.post('/api/auth/login-register', (req, res) => {
+app.post('/api/auth/login-register', async (req, res) => {
     const { phone, email, password } = req.body;
     let user = null;
 
-    if (phone) {
-        user = db.prepare('SELECT * FROM users WHERE phone = ?').get(phone);
-        if (!user) {
-            // Register new phone user
-            const newId = 'user_' + Date.now();
-            const username = 'user_' + Math.floor(1000 + Math.random() * 9000);
-            db.prepare('INSERT INTO users (id, phone, name, username, interests, languages) VALUES (?, ?, ?, ?, ?, ?)')
-              .run(newId, phone, 'Guest User', username, '[]', '[]');
-            user = db.prepare('SELECT * FROM users WHERE id = ?').get(newId);
-        }
-    } else if (email) {
-        user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-        if (!user) {
-            // Register new email user
-            const newId = 'user_' + Date.now();
-            const username = email.split('@')[0] + Math.floor(100 + Math.random() * 900);
-            const passHash = bcrypt.hashSync(password || 'melo1234', 10);
-            db.prepare('INSERT INTO users (id, email, password_hash, name, username, interests, languages) VALUES (?, ?, ?, ?, ?, ?, ?)')
-              .run(newId, email, passHash, email.split('@')[0], username, '[]', '[]');
-            user = db.prepare('SELECT * FROM users WHERE id = ?').get(newId);
-        } else if (password) {
-            // Login verify password
-            if (user.password_hash && !bcrypt.compareSync(password, user.password_hash)) {
-                return res.status(400).json({ error: 'Invalid credentials password.' });
+    try {
+        if (phone) {
+            const userRes = await query('SELECT * FROM users WHERE phone = $1', [phone]);
+            user = userRes.rows[0];
+            if (!user) {
+                const newId = 'user_' + Date.now();
+                const username = 'user_' + Math.floor(1000 + Math.random() * 9000);
+                await query(`
+                    INSERT INTO users (id, phone, name, username, interests, languages) 
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                `, [newId, phone, 'Guest User', username, '[]', '[]']);
+                
+                const selectRes = await query('SELECT * FROM users WHERE id = $1', [newId]);
+                user = selectRes.rows[0];
             }
+        } else if (email) {
+            const userRes = await query('SELECT * FROM users WHERE email = $1', [email]);
+            user = userRes.rows[0];
+            if (!user) {
+                const newId = 'user_' + Date.now();
+                const username = email.split('@')[0] + Math.floor(100 + Math.random() * 900);
+                const passHash = bcrypt.hashSync(password || 'melo1234', 10);
+                await query(`
+                    INSERT INTO users (id, email, password_hash, name, username, interests, languages) 
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                `, [newId, email, passHash, email.split('@')[0], username, '[]', '[]']);
+                
+                const selectRes = await query('SELECT * FROM users WHERE id = $1', [newId]);
+                user = selectRes.rows[0];
+            } else if (password) {
+                if (user.password_hash && !bcrypt.compareSync(password, user.password_hash)) {
+                    return res.status(400).json({ error: 'Invalid credentials.' });
+                }
+            }
+        } else {
+            return res.status(400).json({ error: 'Auth credentials required.' });
         }
-    } else {
-        return res.status(400).json({ error: 'Auth credentials required.' });
+
+        user.interests = JSON.parse(user.interests || '[]');
+        user.languages = JSON.parse(user.languages || '[]');
+
+        const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
+        res.json({ token, user });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
-
-    // Format interests & languages lists
-    user.interests = JSON.parse(user.interests || '[]');
-    user.languages = JSON.parse(user.languages || '[]');
-
-    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user });
 });
 
-app.post('/api/auth/profile', authenticateToken, (req, res) => {
+app.post('/api/auth/profile', authenticateToken, async (req, res) => {
     const { name, username, avatar, bio, interests, languages, city, dob, gender } = req.body;
     
     try {
-        db.prepare(`
+        await query(`
             UPDATE users 
-            SET name = ?, username = ?, avatar = ?, bio = ?, interests = ?, languages = ?, city = ?, dob = ?, gender = ?
-            WHERE id = ?
-        `).run(
+            SET name = $1, username = $2, avatar = $3, bio = $4, interests = $5, languages = $6, city = $7, dob = $8, gender = $9
+            WHERE id = $10
+        `, [
             name, 
             username, 
             avatar, 
@@ -110,469 +122,550 @@ app.post('/api/auth/profile', authenticateToken, (req, res) => {
             dob, 
             gender, 
             req.user.id
-        );
+        ]);
         
-        const updatedUser = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+        const selectRes = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+        const updatedUser = selectRes.rows[0];
         updatedUser.interests = JSON.parse(updatedUser.interests || '[]');
         updatedUser.languages = JSON.parse(updatedUser.languages || '[]');
         
         res.json({ success: true, user: updatedUser });
     } catch (err) {
-        if (err.message.includes('UNIQUE')) {
+        if (err.message.includes('unique') || err.message.includes('duplicate')) {
             return res.status(400).json({ error: 'Username already taken.' });
         }
         res.status(500).json({ error: err.message });
     }
 });
 
-app.get('/api/auth/me', authenticateToken, (req, res) => {
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-    if (!user) return res.status(404).json({ error: 'User not found' });
-    
-    user.interests = JSON.parse(user.interests || '[]');
-    user.languages = JSON.parse(user.languages || '[]');
-    res.json(user);
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+    try {
+        const selectRes = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+        const user = selectRes.rows[0];
+        if (!user) return res.status(404).json({ error: 'User not found' });
+        
+        user.interests = JSON.parse(user.interests || '[]');
+        user.languages = JSON.parse(user.languages || '[]');
+        res.json(user);
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/users/:username', authenticateToken, (req, res) => {
-    const user = db.prepare('SELECT id, name, username, avatar, bio, interests, languages, city FROM users WHERE username = ?').get(req.params.username);
-    if (!user) return res.status(404).json({ error: 'Profile not found' });
-    
-    user.interests = JSON.parse(user.interests || '[]');
-    user.languages = JSON.parse(user.languages || '[]');
-    res.json(user);
+app.get('/api/users/:username', authenticateToken, async (req, res) => {
+    try {
+        const selectRes = await query('SELECT id, name, username, avatar, bio, interests, languages, city FROM users WHERE username = $1', [req.params.username]);
+        const user = selectRes.rows[0];
+        if (!user) return res.status(404).json({ error: 'Profile not found' });
+        
+        user.interests = JSON.parse(user.interests || '[]');
+        user.languages = JSON.parse(user.languages || '[]');
+        res.json(user);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ----------------------------------------------------
 // GATHERINGS ENDPOINTS
 // ----------------------------------------------------
 
-app.get('/api/gatherings', authenticateToken, (req, res) => {
+app.get('/api/gatherings', authenticateToken, async (req, res) => {
     const { search, category, date, public: isPub, age18, smallGroup } = req.query;
     
-    // Check blocked users list to filter events
-    const blockedRecords = db.prepare('SELECT blocked_id FROM blocks WHERE blocker_id = ?').all(req.user.id);
-    const blockedByUser = blockedRecords.map(r => r.blocked_id);
-    
-    const blockersRecords = db.prepare('SELECT blocker_id FROM blocks WHERE blocked_id = ?').all(req.user.id);
-    const blockersOfUser = blockersRecords.map(r => r.blocker_id);
-    const excludedHosts = [...blockedByUser, ...blockersOfUser];
+    try {
+        const blockedRecords = (await query('SELECT blocked_id FROM blocks WHERE blocker_id = $1', [req.user.id])).rows;
+        const blockedByUser = blockedRecords.map(r => r.blocked_id);
+        
+        const blockersRecords = (await query('SELECT blocker_id FROM blocks WHERE blocked_id = $1', [req.user.id])).rows;
+        const blockersOfUser = blockersRecords.map(r => r.blocker_id);
+        const excludedHosts = [...blockedByUser, ...blockersOfUser];
 
-    let query = 'SELECT * FROM gatherings WHERE status = ?';
-    let params = ['active'];
+        let queryStr = 'SELECT * FROM gatherings WHERE status = $1';
+        let params = ['active'];
 
-    if (excludedHosts.length > 0) {
-        query += ` AND hostId NOT IN (${excludedHosts.map(() => '?').join(',')})`;
-        params.push(...excludedHosts);
-    }
+        if (excludedHosts.length > 0) {
+            const placeholders = excludedHosts.map((_, idx) => `$${idx + 2}`).join(',');
+            queryStr += ` AND "hostId" NOT IN (${placeholders})`;
+            params.push(...excludedHosts);
+        }
 
-    let results = db.prepare(query).all(...params);
+        const queryRes = await query(queryStr, params);
+        let results = queryRes.rows;
 
-    // Apply SQL simulation filters
-    if (search) {
-        const q = search.toLowerCase();
-        results = results.filter(g => 
-            g.title.toLowerCase().includes(q) || 
-            g.description.toLowerCase().includes(q) || 
-            g.location.toLowerCase().includes(q)
-        );
-    }
-    if (category) {
-        results = results.filter(g => g.category.toLowerCase() === category.toLowerCase());
-    }
-    if (date) {
-        const todayStr = "2026-08-07";
-        const tmrwStr = "2026-08-08";
-        if (date === "today") results = results.filter(g => g.date === todayStr);
-        else if (date === "tomorrow") results = results.filter(g => g.date === tmrwStr);
-        else if (date === "weekend") {
-            results = results.filter(g => {
-                const day = new Date(g.date).getDay();
-                return day === 0 || day === 6;
+        // In-memory filters (Text Searches)
+        if (search) {
+            const q = search.toLowerCase();
+            results = results.filter(g => 
+                g.title.toLowerCase().includes(q) || 
+                g.description.toLowerCase().includes(q) || 
+                g.location.toLowerCase().includes(q)
+            );
+        }
+        if (category) {
+            results = results.filter(g => g.category.toLowerCase() === category.toLowerCase());
+        }
+        if (date) {
+            const todayStr = "2026-08-07";
+            const tmrwStr = "2026-08-08";
+            if (date === "today") results = results.filter(g => g.date === todayStr);
+            else if (date === "tomorrow") results = results.filter(g => g.date === tmrwStr);
+            else if (date === "weekend") {
+                results = results.filter(g => {
+                    const day = new Date(g.date).getDay();
+                    return day === 0 || day === 6;
+                });
+            }
+        }
+        if (isPub !== undefined) {
+            const val = isPub === 'true' ? 1 : 0;
+            results = results.filter(g => g.public === val);
+        }
+        if (age18 === 'true') {
+            results = results.filter(g => g.ageRestriction.includes("18+") || g.ageRestriction.includes("21+"));
+        }
+        if (smallGroup === 'true') {
+            results = results.filter(g => g.maxAttendees <= 10);
+        }
+
+        // Attach host profile details & guest rosters count
+        const mapped = [];
+        for (const g of results) {
+            const host = (await query('SELECT id, name, username, avatar FROM users WHERE id = $1', [g.hostId])).rows[0];
+            const attendeesCount = parseInt((await query('SELECT count(*) as count FROM attendees WHERE gathering_id = $1', [g.id])).rows[0].count);
+            const attendeesList = (await query('SELECT user_id FROM attendees WHERE gathering_id = $1', [g.id])).rows.map(r => r.user_id);
+            const requestsList = (await query('SELECT user_id FROM join_requests WHERE gathering_id = $1 AND status = $2', [g.id, 'pending'])).rows.map(r => r.user_id);
+            
+            mapped.push({
+                ...g,
+                public: g.public === 1,
+                tags: JSON.parse(g.tags || '[]'),
+                host,
+                attendeeCount: attendeesCount,
+                attendees: attendeesList,
+                requests: requestsList,
+                distance: "1.2 miles away"
             });
         }
-    }
-    if (isPub !== undefined) {
-        const val = isPub === 'true' ? 1 : 0;
-        results = results.filter(g => g.public === val);
-    }
-    if (age18 === 'true') {
-        results = results.filter(g => g.ageRestriction.includes("18+") || g.ageRestriction.includes("21+"));
-    }
-    if (smallGroup === 'true') {
-        results = results.filter(g => g.maxAttendees <= 10);
-    }
 
-    // Attach host profile & attendees count
-    const mapped = results.map(g => {
-        const host = db.prepare('SELECT id, name, username, avatar FROM users WHERE id = ?').get(g.hostId);
-        const attendeesCount = db.prepare('SELECT count(*) as count FROM attendees WHERE gathering_id = ?').get(g.id).count;
-        const attendeesList = db.prepare('SELECT user_id FROM attendees WHERE gathering_id = ?').all(g.id).map(r => r.user_id);
-        const requestsList = db.prepare('SELECT user_id FROM join_requests WHERE gathering_id = ? AND status = ?').all(g.id, 'pending').map(r => r.user_id);
-        
-        return {
-            ...g,
-            public: g.public === 1,
-            tags: JSON.parse(g.tags || '[]'),
-            host,
-            attendeeCount: attendeesCount,
-            attendees: attendeesList,
-            requests: requestsList,
-            distance: "1.2 miles away"
-        };
-    });
-
-    res.json(mapped);
+        res.json(mapped);
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/gatherings', authenticateToken, (req, res) => {
+app.post('/api/gatherings', authenticateToken, async (req, res) => {
     const { title, description, category, date, time, endTime, venue, location, maxAttendees, public: isPub, ageRestriction, dressCode, itemsToBring, rules, coverImage, tags } = req.body;
     
-    const statement = db.prepare(`
-        INSERT INTO gatherings (title, description, category, date, time, endTime, venue, location, maxAttendees, public, ageRestriction, dressCode, itemsToBring, rules, coverImage, tags, hostId)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    
-    const result = statement.run(
-        title,
-        description,
-        category,
-        date,
-        time,
-        endTime,
-        venue,
-        location,
-        maxAttendees,
-        isPub ? 1 : 0,
-        ageRestriction,
-        dressCode,
-        itemsToBring,
-        rules,
-        coverImage,
-        JSON.stringify(tags || []),
-        req.user.id
-    );
+    try {
+        const result = await query(`
+            INSERT INTO gatherings (title, description, category, date, time, "endTime", venue, location, "maxAttendees", public, "ageRestriction", "dressCode", "itemsToBring", rules, "coverImage", tags, "hostId")
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            RETURNING id
+        `, [
+            title,
+            description,
+            category,
+            date,
+            time,
+            endTime,
+            venue,
+            location,
+            maxAttendees,
+            isPub ? 1 : 0,
+            ageRestriction,
+            dressCode,
+            itemsToBring,
+            rules,
+            coverImage,
+            JSON.stringify(tags || []),
+            req.user.id
+        ]);
 
-    const newId = result.lastInsertRowid;
-    // Add Host as attendee automatically
-    db.prepare('INSERT INTO attendees (gathering_id, user_id) VALUES (?, ?)').run(newId, req.user.id);
+        const newId = result.rows[0].id;
+        await query('INSERT INTO attendees (gathering_id, user_id) VALUES ($1, $2)', [newId, req.user.id]);
 
-    res.json({ success: true, id: newId });
+        res.json({ success: true, id: newId });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/gatherings/:id', authenticateToken, (req, res) => {
-    const event = db.prepare('SELECT * FROM gatherings WHERE id = ?').get(req.params.id);
-    if (!event) return res.status(404).json({ error: 'Gathering not found' });
+app.get('/api/gatherings/:id', authenticateToken, async (req, res) => {
+    try {
+        const selectRes = await query('SELECT * FROM gatherings WHERE id = $1', [req.params.id]);
+        const event = selectRes.rows[0];
+        if (!event) return res.status(404).json({ error: 'Gathering not found' });
 
-    event.public = event.public === 1;
-    event.tags = JSON.parse(event.tags || '[]');
-    
-    // Fetch Host
-    const host = db.prepare('SELECT id, name, username, avatar, bio FROM users WHERE id = ?').get(event.hostId);
-    
-    // Fetch Attendees
-    const attendeeRecords = db.prepare(`
-        SELECT u.id, u.name, u.username, u.avatar 
-        FROM attendees a 
-        JOIN users u ON a.user_id = u.id 
-        WHERE a.gathering_id = ?
-    `).all(event.id);
+        event.public = event.public === 1;
+        event.tags = JSON.parse(event.tags || '[]');
+        
+        const host = (await query('SELECT id, name, username, avatar, bio FROM users WHERE id = $1', [event.hostId])).rows[0];
+        
+        const attendeeRecords = (await query(`
+            SELECT u.id, u.name, u.username, u.avatar 
+            FROM attendees a 
+            JOIN users u ON a.user_id = u.id 
+            WHERE a.gathering_id = $1
+        `, [event.id])).rows;
 
-    // Fetch Join Requests
-    const requestRecords = db.prepare('SELECT user_id FROM join_requests WHERE gathering_id = ? AND status = ?').all(event.id, 'pending').map(r => r.user_id);
+        const requestRecords = (await query('SELECT user_id FROM join_requests WHERE gathering_id = $1 AND status = $2', [event.id, 'pending'])).rows.map(r => r.user_id);
 
-    // Fetch Comments
-    const commentRecords = db.prepare(`
-        SELECT c.text, c.created_at, u.name as userName, u.avatar as userAvatar 
-        FROM comments c 
-        JOIN users u ON c.user_id = u.id 
-        WHERE c.gathering_id = ? 
-        ORDER BY c.id ASC
-    `).all(event.id);
-    const comments = commentRecords.map(c => ({
-        userName: c.userName,
-        userAvatar: c.userAvatar,
-        text: c.text,
-        time: 'Just now'
-    }));
+        const commentRecords = (await query(`
+            SELECT c.text, c.created_at, u.name as "userName", u.avatar as "userAvatar" 
+            FROM comments c 
+            JOIN users u ON c.user_id = u.id 
+            WHERE c.gathering_id = $1 
+            ORDER BY c.id ASC
+        `, [event.id])).rows;
+        
+        const comments = commentRecords.map(c => ({
+            userName: c.userName,
+            userAvatar: c.userAvatar,
+            text: c.text,
+            time: 'Just now'
+        }));
 
-    res.json({
-        ...event,
-        host,
-        attendeesList: attendeeRecords,
-        attendees: attendeeRecords.map(a => a.id),
-        requests: requestRecords,
-        comments
-    });
+        res.json({
+            ...event,
+            host,
+            attendeesList: attendeeRecords,
+            attendees: attendeeRecords.map(a => a.id),
+            requests: requestRecords,
+            comments
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.delete('/api/gatherings/:id', authenticateToken, (req, res) => {
-    const event = db.prepare('SELECT hostId FROM gatherings WHERE id = ?').get(req.params.id);
-    if (!event) return res.status(404).json({ error: 'Not found' });
-    if (event.hostId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
+app.delete('/api/gatherings/:id', authenticateToken, async (req, res) => {
+    try {
+        const event = (await query('SELECT "hostId" FROM gatherings WHERE id = $1', [req.params.id])).rows[0];
+        if (!event) return res.status(404).json({ error: 'Not found' });
+        if (event.hostId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
-    db.prepare('DELETE FROM gatherings WHERE id = ?').run(req.params.id);
-    res.json({ success: true });
+        await query('DELETE FROM gatherings WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/gatherings/:id/complete', authenticateToken, (req, res) => {
-    const event = db.prepare('SELECT hostId FROM gatherings WHERE id = ?').get(req.params.id);
-    if (!event) return res.status(404).json({ error: 'Not found' });
-    if (event.hostId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
+app.post('/api/gatherings/:id/complete', authenticateToken, async (req, res) => {
+    try {
+        const event = (await query('SELECT "hostId" FROM gatherings WHERE id = $1', [req.params.id])).rows[0];
+        if (!event) return res.status(404).json({ error: 'Not found' });
+        if (event.hostId !== req.user.id) return res.status(403).json({ error: 'Forbidden' });
 
-    db.prepare("UPDATE gatherings SET status = 'completed' WHERE id = ?").run(req.params.id);
-    res.json({ success: true });
+        await query("UPDATE gatherings SET status = 'completed' WHERE id = $1", [req.params.id]);
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ----------------------------------------------------
 // JOIN / REQUEST FLOW
 // ----------------------------------------------------
 
-app.post('/api/gatherings/:id/join', authenticateToken, (req, res) => {
-    const event = db.prepare('SELECT hostId, public, maxAttendees FROM gatherings WHERE id = ?').get(req.params.id);
-    if (!event) return res.status(404).json({ error: 'Gathering not found' });
+app.post('/api/gatherings/:id/join', authenticateToken, async (req, res) => {
+    try {
+        const event = (await query('SELECT "hostId", public, "maxAttendees" FROM gatherings WHERE id = $1', [req.params.id])).rows[0];
+        if (!event) return res.status(404).json({ error: 'Gathering not found' });
 
-    // Check capacity
-    const currentCount = db.prepare('SELECT count(*) as count FROM attendees WHERE gathering_id = ?').get(req.params.id).count;
-    if (currentCount >= event.maxAttendees) {
-        return res.status(400).json({ error: 'Gathering capacity reached' });
-    }
+        const currentCount = parseInt((await query('SELECT count(*) as count FROM attendees WHERE gathering_id = $1', [req.params.id])).rows[0].count);
+        if (currentCount >= event.maxAttendees) {
+            return res.status(400).json({ error: 'Gathering capacity reached' });
+        }
 
-    if (event.public === 1) {
-        db.prepare('INSERT OR IGNORE INTO attendees (gathering_id, user_id) VALUES (?, ?)').run(req.params.id, req.user.id);
-        
-        // Add Host notification
-        db.prepare(`
-            INSERT INTO notifications (user_id, type, title, message, time)
-            VALUES (?, 'new_member', 'New Guest!', ?, 'Just now')
-        `).run(event.hostId, `Someone joined your public event!`);
+        if (event.public === 1) {
+            await query('INSERT INTO attendees (gathering_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.params.id, req.user.id]);
+            
+            await query(`
+                INSERT INTO notifications (user_id, type, title, message, time)
+                VALUES ($1, 'new_member', 'New Guest!', $2, 'Just now')
+            `, [event.hostId, `Someone joined your public event!`]);
 
-        res.json({ status: 'joined' });
-    } else {
-        db.prepare('INSERT OR IGNORE INTO join_requests (gathering_id, user_id, status) VALUES (?, ?, ?)')
-          .run(req.params.id, req.user.id, 'pending');
+            res.json({ status: 'joined' });
+        } else {
+            await query('INSERT INTO join_requests (gathering_id, user_id, status) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [req.params.id, req.user.id, 'pending']);
 
-        db.prepare(`
-            INSERT INTO notifications (user_id, type, title, message, time)
-            VALUES (?, 'request', 'Join Request', ?, 'Just now')
-        `).run(event.hostId, `A user requested an invitation to join your private event.`);
+            await query(`
+                INSERT INTO notifications (user_id, type, title, message, time)
+                VALUES ($1, 'request', 'Join Request', $2, 'Just now')
+            `, [event.hostId, `A user requested an invitation to join your private event.`]);
 
-        res.json({ status: 'pending' });
+            res.json({ status: 'pending' });
+        }
+    } catch(err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
-app.post('/api/gatherings/:id/leave', authenticateToken, (req, res) => {
-    db.prepare('DELETE FROM attendees WHERE gathering_id = ? AND user_id = ?').run(req.params.id, req.user.id);
-    db.prepare('DELETE FROM join_requests WHERE gathering_id = ? AND user_id = ?').run(req.params.id, req.user.id);
-    res.json({ success: true });
+app.post('/api/gatherings/:id/leave', authenticateToken, async (req, res) => {
+    try {
+        await query('DELETE FROM attendees WHERE gathering_id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+        await query('DELETE FROM join_requests WHERE gathering_id = $1 AND user_id = $2', [req.params.id, req.user.id]);
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.put('/api/gatherings/:id/requests', authenticateToken, (req, res) => {
-    const { userId, action } = req.body; // approve or reject
-    const event = db.prepare('SELECT hostId, title FROM gatherings WHERE id = ?').get(req.params.id);
+app.put('/api/gatherings/:id/requests', authenticateToken, async (req, res) => {
+    const { userId, action } = req.body;
     
-    if (!event || event.hostId !== req.user.id) {
-        return res.status(403).json({ error: 'Forbidden' });
-    }
-
-    db.prepare('DELETE FROM join_requests WHERE gathering_id = ? AND user_id = ?').run(req.params.id, userId);
-
-    if (action === 'approve') {
-        db.prepare('INSERT OR IGNORE INTO attendees (gathering_id, user_id) VALUES (?, ?)').run(req.params.id, userId);
+    try {
+        const event = (await query('SELECT "hostId", title FROM gatherings WHERE id = $1', [req.params.id])).rows[0];
         
-        // Notify guest
-        db.prepare(`
-            INSERT INTO notifications (user_id, type, title, message, time)
-            VALUES (?, 'approved', 'Request Approved!', ?, 'Just now')
-        `).run(userId, `Your request to join "${event.title}" has been approved!`);
-    } else {
-        db.prepare(`
-            INSERT INTO notifications (user_id, type, title, message, time)
-            VALUES (?, 'rejected', 'Request Declined', ?, 'Just now')
-        `).run(userId, `Your request to join "${event.title}" was declined.`);
-    }
+        if (!event || event.hostId !== req.user.id) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
 
-    res.json({ success: true });
+        await query('DELETE FROM join_requests WHERE gathering_id = $1 AND user_id = $2', [req.params.id, userId]);
+
+        if (action === 'approve') {
+            await query('INSERT INTO attendees (gathering_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.params.id, userId]);
+            
+            await query(`
+                INSERT INTO notifications (user_id, type, title, message, time)
+                VALUES ($1, 'approved', 'Request Approved!', $2, 'Just now')
+            `, [userId, `Your request to join "${event.title}" has been approved!`]);
+        } else {
+            await query(`
+                INSERT INTO notifications (user_id, type, title, message, time)
+                VALUES ($1, 'rejected', 'Request Declined', $2, 'Just now')
+            `, [userId, `Your request to join "${event.title}" was declined.`]);
+        }
+
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// Comments
-app.post('/api/gatherings/:id/comments', authenticateToken, (req, res) => {
+app.post('/api/gatherings/:id/comments', authenticateToken, async (req, res) => {
     const { text } = req.body;
-    db.prepare('INSERT INTO comments (gathering_id, user_id, text) VALUES (?, ?, ?)').run(req.params.id, req.user.id, text);
-    
-    // Notify host if different
-    const event = db.prepare('SELECT hostId, title FROM gatherings WHERE id = ?').get(req.params.id);
-    if (event && event.hostId !== req.user.id) {
-        db.prepare(`
-            INSERT INTO notifications (user_id, type, title, message, time)
-            VALUES (?, 'comment', 'New Comment', ?, 'Just now')
-        `).run(event.hostId, `Someone commented on: "${event.title}"`);
+    try {
+        await query('INSERT INTO comments (gathering_id, user_id, text) VALUES ($1, $2, $3)', [req.params.id, req.user.id, text]);
+        
+        const event = (await query('SELECT "hostId", title FROM gatherings WHERE id = $1', [req.params.id])).rows[0];
+        if (event && event.hostId !== req.user.id) {
+            await query(`
+                INSERT INTO notifications (user_id, type, title, message, time)
+                VALUES ($1, 'comment', 'New Comment', $2, 'Just now')
+            `, [event.hostId, `Someone commented on: "${event.title}"`]);
+        }
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
     }
-    
-    res.json({ success: true });
 });
 
 // ----------------------------------------------------
 // DASHBOARD ENDPOINTS
 // ----------------------------------------------------
 
-app.get('/api/dashboard/hosting', authenticateToken, (req, res) => {
-    const events = db.prepare('SELECT * FROM gatherings WHERE hostId = ?').all(req.user.id);
-    const mapped = events.map(event => {
-        const attendeeIds = db.prepare('SELECT user_id FROM attendees WHERE gathering_id = ?').all(event.id).map(r => r.user_id);
-        const requests = db.prepare(`
-            SELECT u.id, u.name, u.avatar 
-            FROM join_requests jr 
-            JOIN users u ON jr.user_id = u.id 
-            WHERE jr.gathering_id = ? AND jr.status = 'pending'
-        `).all(event.id);
-        
-        return {
-            ...event,
-            public: event.public === 1,
-            attendees: attendeeIds,
-            requests
-        };
-    });
-    res.json(mapped);
+app.get('/api/dashboard/hosting', authenticateToken, async (req, res) => {
+    try {
+        const events = (await query('SELECT * FROM gatherings WHERE "hostId" = $1', [req.user.id])).rows;
+        const mapped = [];
+        for (const event of events) {
+            const attendeeIds = (await query('SELECT user_id FROM attendees WHERE gathering_id = $1', [event.id])).rows.map(r => r.user_id);
+            const requests = (await query(`
+                SELECT u.id, u.name, u.avatar 
+                FROM join_requests jr 
+                JOIN users u ON jr.user_id = u.id 
+                WHERE jr.gathering_id = $1 AND jr.status = 'pending'
+            `, [event.id])).rows;
+            
+            mapped.push({
+                ...event,
+                public: event.public === 1,
+                attendees: attendeeIds,
+                requests
+            });
+        }
+        res.json(mapped);
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/dashboard/attending', authenticateToken, (req, res) => {
-    const attending = db.prepare(`
-        SELECT g.* 
-        FROM attendees a 
-        JOIN gatherings g ON a.gathering_id = g.id 
-        WHERE a.user_id = ? AND g.hostId != ?
-    `).all(req.user.id, req.user.id);
+app.get('/api/dashboard/attending', authenticateToken, async (req, res) => {
+    try {
+        const attending = (await query(`
+            SELECT g.* 
+            FROM attendees a 
+            JOIN gatherings g ON a.gathering_id = g.id 
+            WHERE a.user_id = $1 AND g."hostId" != $2
+        `, [req.user.id, req.user.id])).rows;
 
-    const pending = db.prepare(`
-        SELECT g.* 
-        FROM join_requests jr 
-        JOIN gatherings g ON jr.gathering_id = g.id 
-        WHERE jr.user_id = ? AND jr.status = 'pending'
-    `).all(req.user.id);
+        const pending = (await query(`
+            SELECT g.* 
+            FROM join_requests jr 
+            JOIN gatherings g ON jr.gathering_id = g.id 
+            WHERE jr.user_id = $1 AND jr.status = 'pending'
+        `, [req.user.id])).rows;
 
-    res.json({
-        attending: attending.map(g => ({ ...g, public: g.public === 1 })),
-        pending: pending.map(g => ({ ...g, public: g.public === 1 }))
-    });
+        res.json({
+            attending: attending.map(g => ({ ...g, public: g.public === 1 })),
+            pending: pending.map(g => ({ ...g, public: g.public === 1 }))
+        });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ----------------------------------------------------
 // SAVED GATHERINGS
 // ----------------------------------------------------
 
-app.get('/api/saved', authenticateToken, (req, res) => {
-    const list = db.prepare(`
-        SELECT g.* 
-        FROM saved_gatherings sg 
-        JOIN gatherings g ON sg.gathering_id = g.id 
-        WHERE sg.user_id = ? AND g.status = 'active'
-    `).all(req.user.id);
-    
-    res.json(list.map(g => ({ ...g, public: g.public === 1 })));
+app.get('/api/saved', authenticateToken, async (req, res) => {
+    try {
+        const list = (await query(`
+            SELECT g.* 
+            FROM saved_gatherings sg 
+            JOIN gatherings g ON sg.gathering_id = g.id 
+            WHERE sg.user_id = $1 AND g.status = 'active'
+        `, [req.user.id])).rows;
+        
+        res.json(list.map(g => ({ ...g, public: g.public === 1 })));
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/saved/:id', authenticateToken, (req, res) => {
-    db.prepare('INSERT OR IGNORE INTO saved_gatherings (user_id, gathering_id) VALUES (?, ?)').run(req.user.id, req.params.id);
-    res.json({ success: true });
+app.post('/api/saved/:id', authenticateToken, async (req, res) => {
+    try {
+        await query('INSERT INTO saved_gatherings (user_id, gathering_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.user.id, req.params.id]);
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.delete('/api/saved/:id', authenticateToken, (req, res) => {
-    db.prepare('DELETE FROM saved_gatherings WHERE user_id = ? AND gathering_id = ?').run(req.user.id, req.params.id);
-    res.json({ success: true });
+app.delete('/api/saved/:id', authenticateToken, async (req, res) => {
+    try {
+        await query('DELETE FROM saved_gatherings WHERE user_id = $1 AND gathering_id = $2', [req.user.id, req.params.id]);
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ----------------------------------------------------
 // MESSAGES & THREADS
 // ----------------------------------------------------
 
-app.get('/api/chats', authenticateToken, (req, res) => {
+app.get('/api/chats', authenticateToken, async (req, res) => {
     const uid = req.user.id;
     
-    // Find all users current user has messages with
-    const query = `
-        SELECT DISTINCT CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END as chatter_id 
-        FROM messages 
-        WHERE sender_id = ? OR receiver_id = ?
-    `;
-    const chatters = db.prepare(query).all(uid, uid, uid).map(r => r.chatter_id);
-
-    const threads = chatters.map(chatterId => {
-        const oppUser = db.prepare('SELECT id, name, username, avatar FROM users WHERE id = ?').get(chatterId);
-        
-        // Find last message
-        const lastMsg = db.prepare(`
-            SELECT text, timestamp, sender_id 
+    try {
+        const queryStr = `
+            SELECT DISTINCT CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END as chatter_id 
             FROM messages 
-            WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
-            ORDER BY id DESC LIMIT 1
-        `).get(uid, chatterId, chatterId, uid);
+            WHERE sender_id = $2 OR receiver_id = $3
+        `;
+        const chatters = (await query(queryStr, [uid, uid, uid])).rows.map(r => r.chatter_id);
 
-        return {
-            id: `chat_${uid}_${chatterId}`,
-            userA: uid,
-            userB: chatterId,
-            oppUser,
-            lastMsg
-        };
-    });
+        const threads = [];
+        for (const chatterId of chatters) {
+            const oppUser = (await query('SELECT id, name, username, avatar FROM users WHERE id = $1', [chatterId])).rows[0];
+            
+            const lastMsg = (await query(`
+                SELECT text, timestamp, sender_id 
+                FROM messages 
+                WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $3 AND receiver_id = $4)
+                ORDER BY id DESC LIMIT 1
+            `, [uid, chatterId, chatterId, uid])).rows[0] || null;
 
-    res.json(threads);
+            threads.push({
+                id: `chat_${uid}_${chatterId}`,
+                userA: uid,
+                userB: chatterId,
+                oppUser,
+                lastMsg
+            });
+        }
+
+        res.json(threads);
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.get('/api/chats/:userId', authenticateToken, (req, res) => {
+app.get('/api/chats/:userId', authenticateToken, async (req, res) => {
     const opposingId = req.params.userId;
     const uid = req.user.id;
     
-    // Mark as read
-    db.prepare('UPDATE messages SET is_read = 1 WHERE sender_id = ? AND receiver_id = ?').run(opposingId, uid);
+    try {
+        await query('UPDATE messages SET is_read = 1 WHERE sender_id = $1 AND receiver_id = $2', [opposingId, uid]);
 
-    const msgs = db.prepare(`
-        SELECT * FROM messages 
-        WHERE (sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?)
-        ORDER BY id ASC
-    `).all(uid, opposingId, opposingId, uid);
+        const msgs = (await query(`
+            SELECT * FROM messages 
+            WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $3 AND receiver_id = $4)
+            ORDER BY id ASC
+        `, [uid, opposingId, opposingId, uid])).rows;
 
-    res.json(msgs);
+        res.json(msgs);
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ----------------------------------------------------
 // NOTIFICATIONS
 // ----------------------------------------------------
 
-app.get('/api/notifications', authenticateToken, (req, res) => {
-    const list = db.prepare('SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC').all(req.user.id);
-    res.json(list.map(n => ({ ...n, read: n.read === 1 })));
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+    try {
+        const list = (await query('SELECT * FROM notifications WHERE user_id = $1 ORDER BY id DESC', [req.user.id])).rows;
+        res.json(list.map(n => ({ ...n, read: n.read === 1 })));
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.put('/api/notifications/read', authenticateToken, (req, res) => {
-    db.prepare('UPDATE notifications SET read = 1 WHERE user_id = ?').run(req.user.id);
-    res.json({ success: true });
+app.put('/api/notifications/read', authenticateToken, async (req, res) => {
+    try {
+        await query('UPDATE notifications SET read = 1 WHERE user_id = $1', [req.user.id]);
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ----------------------------------------------------
 // SAFETY & BLOCKS
 // ----------------------------------------------------
 
-app.post('/api/safety/block', authenticateToken, (req, res) => {
+app.post('/api/safety/block', authenticateToken, async (req, res) => {
     const { targetUserId } = req.body;
-    db.prepare('INSERT OR IGNORE INTO blocks (blocker_id, blocked_id) VALUES (?, ?)').run(req.user.id, targetUserId);
-    res.json({ success: true });
+    try {
+        await query('INSERT INTO blocks (blocker_id, blocked_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.user.id, targetUserId]);
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-app.post('/api/safety/report', authenticateToken, (req, res) => {
+app.post('/api/safety/report', authenticateToken, async (req, res) => {
     const { reportedType, reportedId, reason, details } = req.body;
-    db.prepare('INSERT INTO reports (reporter_id, reported_type, reported_id, reason, details) VALUES (?, ?, ?, ?, ?)')
-      .run(req.user.id, reportedType, reportedId, reason, details);
-    res.json({ success: true });
+    try {
+        await query('INSERT INTO reports (reporter_id, reported_type, reported_id, reason, details) VALUES ($1, $2, $3, $4, $5)', [req.user.id, reportedType, reportedId, reason, details]);
+        res.json({ success: true });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ----------------------------------------------------
 // SOCKET.IO REALTIME EVENTS
 // ----------------------------------------------------
 
-const activeSockets = new Map(); // Maps user.id -> socket.id
+const activeSockets = new Map();
 
 io.on('connection', (socket) => {
     
@@ -581,75 +674,81 @@ io.on('connection', (socket) => {
         socket.userId = userId;
     });
 
-    socket.on('send_chat', (data) => {
+    socket.on('send_chat', async (data) => {
         const { receiverId, text, imageUrl } = data;
         const senderId = socket.userId;
         if (!senderId) return;
 
         const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         
-        // Save to DB
-        const result = db.prepare(`
-            INSERT INTO messages (sender_id, receiver_id, text, image_url, timestamp, is_read)
-            VALUES (?, ?, ?, ?, ?, 0)
-        `).run(senderId, receiverId, text, imageUrl || null, timestamp);
+        try {
+            // Save to DB
+            const result = await query(`
+                INSERT INTO messages (sender_id, receiver_id, text, image_url, timestamp, is_read)
+                VALUES ($1, $2, $3, $4, $5, 0)
+                RETURNING id
+            `, [senderId, receiverId, text, imageUrl || null, timestamp]);
 
-        const savedMsg = {
-            id: result.lastInsertRowid,
-            sender_id: senderId,
-            receiver_id: receiverId,
-            text,
-            image_url: imageUrl || null,
-            timestamp,
-            is_read: 0
-        };
+            const savedMsg = {
+                id: result.rows[0].id,
+                sender_id: senderId,
+                receiver_id: receiverId,
+                text,
+                image_url: imageUrl || null,
+                timestamp,
+                is_read: 0
+            };
 
-        // Emit back to sender
-        socket.emit('receive_chat', savedMsg);
+            // Emit back to sender
+            socket.emit('receive_chat', savedMsg);
 
-        // Send to receiver if online
-        const receiverSocketId = activeSockets.get(receiverId);
-        if (receiverSocketId) {
-            io.to(receiverSocketId).emit('receive_chat', savedMsg);
-        }
-        
-        // Generate automatic mock response trigger if receiver is a simulated host account
-        if (receiverId.startsWith('host_') || receiverId.startsWith('guest_')) {
-            setTimeout(() => {
-                const typingSocketId = activeSockets.get(senderId);
-                if (typingSocketId) {
-                    io.to(typingSocketId).emit('opp_typing', { typing: true });
-                }
-                
+            // Send to receiver if online
+            const receiverSocketId = activeSockets.get(receiverId);
+            if (receiverSocketId) {
+                io.to(receiverSocketId).emit('receive_chat', savedMsg);
+            }
+            
+            // Mock auto-responder logic for host users
+            if (receiverId.startsWith('host_') || receiverId.startsWith('guest_')) {
                 setTimeout(() => {
+                    const typingSocketId = activeSockets.get(senderId);
                     if (typingSocketId) {
-                        io.to(typingSocketId).emit('opp_typing', { typing: false });
+                        io.to(typingSocketId).emit('opp_typing', { typing: true });
                     }
                     
-                    let replyText = `Hey! Thanks for messaging. Let me check the details and get right back to you!`;
-                    if (text.toLowerCase().includes('wine')) {
-                        replyText = `Red wine pairs beautifully with the fresh tomato pasta I'm preparing. Thanks for bringing a bottle!`;
-                    }
-                    
-                    const replyTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    const replyResult = db.prepare(`
-                        INSERT INTO messages (sender_id, receiver_id, text, timestamp, is_read)
-                        VALUES (?, ?, ?, ?, 1)
-                    `).run(receiverId, senderId, replyText, replyTimestamp);
-                    
-                    const replyMsg = {
-                        id: replyResult.lastInsertRowid,
-                        sender_id: receiverId,
-                        receiver_id: senderId,
-                        text: replyText,
-                        image_url: null,
-                        timestamp: replyTimestamp,
-                        is_read: 1
-                    };
-                    
-                    socket.emit('receive_chat', replyMsg);
-                }, 2000);
-            }, 1000);
+                    setTimeout(async () => {
+                        if (typingSocketId) {
+                            io.to(typingSocketId).emit('opp_typing', { typing: false });
+                        }
+                        
+                        let replyText = `Hey! Thanks for messaging. Let me check the details and get right back to you!`;
+                        if (text.toLowerCase().includes('wine')) {
+                            replyText = `Red wine pairs beautifully with the fresh tomato pasta I'm preparing. Thanks for bringing a bottle!`;
+                        }
+                        
+                        const replyTimestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        const replyResult = await query(`
+                            INSERT INTO messages (sender_id, receiver_id, text, timestamp, is_read)
+                            VALUES ($1, $2, $3, $4, 1)
+                            RETURNING id
+                        `, [receiverId, senderId, replyText, replyTimestamp]);
+                        
+                        const replyMsg = {
+                            id: replyResult.rows[0].id,
+                            sender_id: receiverId,
+                            receiver_id: senderId,
+                            text: replyText,
+                            image_url: null,
+                            timestamp: replyTimestamp,
+                            is_read: 1
+                        };
+                        
+                        socket.emit('receive_chat', replyMsg);
+                    }, 2000);
+                }, 1000);
+            }
+        } catch(err) {
+            console.error("Socket chat persist error:", err);
         }
     });
 
@@ -658,11 +757,6 @@ io.on('connection', (socket) => {
             activeSockets.delete(socket.userId);
         }
     });
-});
-
-app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api')) return next();
-    res.sendFile(path.join(clientDistPath, 'index.html'));
 });
 
 server.listen(PORT, () => {
