@@ -1,0 +1,21 @@
+# Dependency directories
+node_modules/
+server/node_modules/
+
+# Production build output
+dist/
+
+# Local SQLite files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+server/melo.db
+
+# Environmental configurations
+.env
+.env.local
+
+# Operating System files
+.DS_Store
+Thumbs.db

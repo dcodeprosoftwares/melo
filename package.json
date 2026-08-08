@@ -1,0 +1,13 @@
+{
+  "name": "melo",
+  "version": "1.0.0",
+  "description": "Melo Community Gathering Application",
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "vite build && cd server && npm install",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}

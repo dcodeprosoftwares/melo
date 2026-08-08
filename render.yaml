@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: melo-app
+    env: node
+    buildCommand: npm run build
+    startCommand: node server/index.js
+    envVars:
+      - key: NODE_VERSION
+        value: 20.0.0
+      - key: DATABASE_PATH
+        value: /data/melo.db
+    disk:
+      name: melo-data
+      mountPath: /data
+      sizeGB: 1
