@@ -138,6 +138,39 @@ app.post('/api/auth/profile', authenticateToken, async (req, res) => {
     }
 });
 
+app.post('/api/auth/send-aadhar-otp', authenticateToken, async (req, res) => {
+    const { aadharNumber } = req.body;
+    if (!aadharNumber || aadharNumber.length !== 12) {
+        return res.status(400).json({ error: 'Invalid Aadhaar number' });
+    }
+    // Mock sending OTP
+    console.log(`Sending mock Aadhaar OTP to number associated with ${aadharNumber}`);
+    res.json({ success: true, message: 'OTP sent successfully' });
+});
+
+app.post('/api/auth/verify-aadhar', authenticateToken, async (req, res) => {
+    const { aadharNumber, otp } = req.body;
+    
+    // In a real app, this would verify against a KYC API provider.
+    // We use a mock OTP '123456' for demonstration.
+    if (otp !== '123456') {
+        return res.status(400).json({ error: 'Invalid OTP code. Please use 123456 for testing.' });
+    }
+
+    try {
+        await query('UPDATE users SET is_aadhar_verified = 1, aadhar_number = $1 WHERE id = $2', [aadharNumber, req.user.id]);
+        
+        const selectRes = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
+        const updatedUser = selectRes.rows[0];
+        updatedUser.interests = JSON.parse(updatedUser.interests || '[]');
+        updatedUser.languages = JSON.parse(updatedUser.languages || '[]');
+        
+        res.json({ success: true, user: updatedUser });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/auth/me', authenticateToken, async (req, res) => {
     try {
         const selectRes = await query('SELECT * FROM users WHERE id = $1', [req.user.id]);
