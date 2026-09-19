@@ -639,7 +639,46 @@ app.get('/api/saved', authenticateToken, async (req, res) => {
             WHERE sg.user_id = $1 AND g.status = 'active'
         `, [req.user.id])).rows;
         
-        res.json(list.map(g => ({ ...g, public: g.public === 1 })));
+        if (list.length === 0) {
+            return res.json([]);
+        }
+
+        const hostIds = [...new Set(list.map(g => g.hostId))];
+        const gatheringIds = list.map(g => g.id);
+        
+        const hostPlaceholders = hostIds.map((_, i) => `$${i+1}`).join(',');
+        const gatheringPlaceholders = gatheringIds.map((_, i) => `$${i+1}`).join(',');
+
+        const hostsRes = await query(`SELECT id, name, username, avatar FROM users WHERE id IN (${hostPlaceholders})`, hostIds);
+        const hostsMap = hostsRes.rows.reduce((acc, host) => { acc[host.id] = host; return acc; }, {});
+
+        const attendeesRes = await query(`SELECT gathering_id, user_id FROM attendees WHERE gathering_id IN (${gatheringPlaceholders})`, gatheringIds);
+        const attendeesMap = {};
+        const attendeesCountMap = {};
+        for (const row of attendeesRes.rows) {
+            if (!attendeesMap[row.gathering_id]) attendeesMap[row.gathering_id] = [];
+            attendeesMap[row.gathering_id].push(row.user_id);
+            attendeesCountMap[row.gathering_id] = (attendeesCountMap[row.gathering_id] || 0) + 1;
+        }
+
+        const requestsRes = await query(`SELECT gathering_id, user_id FROM join_requests WHERE status = 'pending' AND gathering_id IN (${gatheringPlaceholders})`, gatheringIds);
+        const requestsMap = {};
+        for (const row of requestsRes.rows) {
+            if (!requestsMap[row.gathering_id]) requestsMap[row.gathering_id] = [];
+            requestsMap[row.gathering_id].push(row.user_id);
+        }
+
+        const mapped = list.map(g => ({
+            ...g,
+            public: g.public === 1,
+            tags: JSON.parse(g.tags || '[]'),
+            host: hostsMap[g.hostId] || null,
+            attendeeCount: attendeesCountMap[g.id] || 0,
+            attendees: attendeesMap[g.id] || [],
+            requests: requestsMap[g.id] || []
+        }));
+
+        res.json(mapped);
     } catch(err) {
         res.status(500).json({ error: err.message });
     }
