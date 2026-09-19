@@ -1472,6 +1472,40 @@ window.submitComment = async function(id) {
 // CREATE GATHERING
 // ----------------------------------------------------
 
+async function useCurrentLocationForEvent() {
+    const locInput = document.getElementById('create-location');
+    if (!navigator.geolocation) {
+        showPopMessage("Geolocation is not supported by your browser", "danger");
+        return;
+    }
+    
+    locInput.value = "Locating...";
+    
+    navigator.geolocation.getCurrentPosition(async (position) => {
+        try {
+            const { latitude, longitude } = position.coords;
+            const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`);
+            const data = await res.json();
+            
+            if (data && data.address) {
+                const city = data.address.city || data.address.town || data.address.village || data.address.county || "";
+                const state = data.address.state || "";
+                const locString = [city, state].filter(Boolean).join(", ");
+                locInput.value = locString || "Unknown Location";
+            } else {
+                locInput.value = "";
+                showPopMessage("Could not determine city from coordinates", "danger");
+            }
+        } catch(e) {
+            locInput.value = "";
+            showPopMessage("Failed to fetch location data", "danger");
+        }
+    }, (error) => {
+        locInput.value = "";
+        showPopMessage("Location access denied or failed", "danger");
+    });
+}
+
 function renderCreateView(container) {
     container.innerHTML = `
         <div class="container-card" style="max-width:650px; margin: 20px auto;">
@@ -1538,7 +1572,10 @@ function renderCreateView(container) {
                         <input type="text" class="form-input" id="create-venue" placeholder="My apartment" required>
                     </div>
                     <div class="form-group" style="margin-bottom:0;">
-                        <label class="form-label">City, State</label>
+                        <label class="form-label" style="display:flex; justify-content:space-between; align-items:center;">
+                            City, State
+                            <button type="button" class="btn btn-outline" style="padding:2px 8px; font-size:11px; height:auto; border-radius:12px;" onclick="useCurrentLocationForEvent()">📍 Current</button>
+                        </label>
                         <input type="text" class="form-input" id="create-location" placeholder="San Francisco, CA" required>
                     </div>
                     <div class="form-group" style="margin-bottom:0;">
