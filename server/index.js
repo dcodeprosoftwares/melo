@@ -228,25 +228,46 @@ app.get('/api/gatherings', authenticateToken, async (req, res) => {
             results = results.filter(g => g.maxAttendees <= 10);
         }
 
-        // Attach host profile details & guest rosters count
-        const mapped = [];
-        for (const g of results) {
-            const host = (await query('SELECT id, name, username, avatar FROM users WHERE id = $1', [g.hostId])).rows[0];
-            const attendeesCount = parseInt((await query('SELECT count(*) as count FROM attendees WHERE gathering_id = $1', [g.id])).rows[0].count);
-            const attendeesList = (await query('SELECT user_id FROM attendees WHERE gathering_id = $1', [g.id])).rows.map(r => r.user_id);
-            const requestsList = (await query('SELECT user_id FROM join_requests WHERE gathering_id = $1 AND status = $2', [g.id, 'pending'])).rows.map(r => r.user_id);
-            
-            mapped.push({
-                ...g,
-                public: g.public === 1,
-                tags: JSON.parse(g.tags || '[]'),
-                host,
-                attendeeCount: attendeesCount,
-                attendees: attendeesList,
-                requests: requestsList,
-                distance: "1.2 miles away"
-            });
+        if (results.length === 0) {
+            return res.json([]);
         }
+
+        const hostIds = [...new Set(results.map(g => g.hostId))];
+        const gatheringIds = results.map(g => g.id);
+        
+        // Construct IN clause dynamically
+        const hostPlaceholders = hostIds.map((_, i) => `$${i+1}`).join(',');
+        const gatheringPlaceholders = gatheringIds.map((_, i) => `$${i+1}`).join(',');
+
+        const hostsRes = await query(`SELECT id, name, username, avatar FROM users WHERE id IN (${hostPlaceholders})`, hostIds);
+        const hostsMap = hostsRes.rows.reduce((acc, host) => { acc[host.id] = host; return acc; }, {});
+
+        const attendeesRes = await query(`SELECT gathering_id, user_id FROM attendees WHERE gathering_id IN (${gatheringPlaceholders})`, gatheringIds);
+        const attendeesMap = {};
+        const attendeesCountMap = {};
+        for (const row of attendeesRes.rows) {
+            if (!attendeesMap[row.gathering_id]) attendeesMap[row.gathering_id] = [];
+            attendeesMap[row.gathering_id].push(row.user_id);
+            attendeesCountMap[row.gathering_id] = (attendeesCountMap[row.gathering_id] || 0) + 1;
+        }
+
+        const requestsRes = await query(`SELECT gathering_id, user_id FROM join_requests WHERE status = 'pending' AND gathering_id IN (${gatheringPlaceholders})`, gatheringIds);
+        const requestsMap = {};
+        for (const row of requestsRes.rows) {
+            if (!requestsMap[row.gathering_id]) requestsMap[row.gathering_id] = [];
+            requestsMap[row.gathering_id].push(row.user_id);
+        }
+
+        const mapped = results.map(g => ({
+            ...g,
+            public: g.public === 1,
+            tags: JSON.parse(g.tags || '[]'),
+            host: hostsMap[g.hostId] || null,
+            attendeeCount: attendeesCountMap[g.id] || 0,
+            attendees: attendeesMap[g.id] || [],
+            requests: requestsMap[g.id] || [],
+            distance: "1.2 miles away"
+        }));
 
         res.json(mapped);
     } catch(err) {
