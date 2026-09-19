@@ -166,6 +166,30 @@ app.get('/api/users/:username', authenticateToken, async (req, res) => {
     }
 });
 
+app.get('/api/users/id/:id/portfolio', authenticateToken, async (req, res) => {
+    try {
+        const hosted = (await query('SELECT * FROM gatherings WHERE "hostId" = $1', [req.params.id])).rows;
+        
+        const attendedRecords = (await query('SELECT gathering_id FROM attendees WHERE user_id = $1', [req.params.id])).rows;
+        const attendedIds = attendedRecords.map(r => r.gathering_id);
+        
+        let attended = [];
+        if (attendedIds.length > 0) {
+            const placeholders = attendedIds.map((_, i) => `$${i+1}`).join(',');
+            attended = (await query(`SELECT * FROM gatherings WHERE id IN (${placeholders})`, attendedIds)).rows;
+        }
+
+        res.json({ hosted, attended });
+    } catch(err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/users/id/:id/reviews', authenticateToken, (req, res) => {
+    // Reviews not yet implemented in DB, return empty array
+    res.json([]);
+});
+
 // ----------------------------------------------------
 // GATHERINGS ENDPOINTS
 // ----------------------------------------------------
@@ -680,6 +704,11 @@ app.post('/api/safety/report', authenticateToken, async (req, res) => {
     } catch(err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+// Fallback for missing API routes to return JSON instead of HTML
+app.use('/api', (req, res) => {
+    res.status(404).json({ error: 'API endpoint not found' });
 });
 
 // ----------------------------------------------------
