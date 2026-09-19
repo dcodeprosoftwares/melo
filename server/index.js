@@ -227,8 +227,20 @@ app.get('/api/users/id/:id/reviews', authenticateToken, (req, res) => {
 // GATHERINGS ENDPOINTS
 // ----------------------------------------------------
 
+function haversineDist(lat1, lon1, lat2, lon2) {
+    const toRad = x => x * Math.PI / 180;
+    const R = 6371; // Earth's radius in km
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+}
+
 app.get('/api/gatherings', authenticateToken, async (req, res) => {
-    const { search, category, date, public: isPub, age18, smallGroup } = req.query;
+    const { search, category, date, public: isPub, age18, smallGroup, nearMeLat, nearMeLng, radiusKm } = req.query;
     
     try {
         const blockedRecords = (await query('SELECT blocked_id FROM blocks WHERE blocker_id = $1', [req.user.id])).rows;
@@ -284,6 +296,22 @@ app.get('/api/gatherings', authenticateToken, async (req, res) => {
         if (smallGroup === 'true') {
             results = results.filter(g => g.maxAttendees <= 10);
         }
+        
+        if (nearMeLat && nearMeLng && radiusKm) {
+            const lat1 = parseFloat(nearMeLat);
+            const lon1 = parseFloat(nearMeLng);
+            const rad = parseFloat(radiusKm);
+            results = results.filter(g => {
+                if (g.lat == null || g.lng == null) return false;
+                const dist = haversineDist(lat1, lon1, g.lat, g.lng);
+                if (dist <= rad) {
+                    g.distance = dist.toFixed(1);
+                    return true;
+                }
+                return false;
+            });
+            results.sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance));
+        }
 
         if (results.length === 0) {
             return res.json([]);
@@ -333,12 +361,12 @@ app.get('/api/gatherings', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/gatherings', authenticateToken, async (req, res) => {
-    const { title, description, category, date, time, endTime, venue, location, maxAttendees, public: isPub, ageRestriction, dressCode, itemsToBring, rules, coverImage, tags } = req.body;
+    const { title, description, category, date, time, endTime, venue, location, maxAttendees, public: isPub, ageRestriction, dressCode, itemsToBring, rules, coverImage, tags, lat, lng } = req.body;
     
     try {
         const result = await query(`
-            INSERT INTO gatherings (title, description, category, date, time, "endTime", venue, location, "maxAttendees", public, "ageRestriction", "dressCode", "itemsToBring", rules, "coverImage", tags, "hostId")
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            INSERT INTO gatherings (title, description, category, date, time, "endTime", venue, location, "maxAttendees", public, "ageRestriction", "dressCode", "itemsToBring", rules, "coverImage", tags, "hostId", lat, lng)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
             RETURNING id
         `, [
             title,
@@ -357,7 +385,9 @@ app.post('/api/gatherings', authenticateToken, async (req, res) => {
             rules,
             coverImage,
             JSON.stringify(tags || []),
-            req.user.id
+            req.user.id,
+            lat || null,
+            lng || null
         ]);
 
         const newId = result.rows[0].id;

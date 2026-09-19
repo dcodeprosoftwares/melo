@@ -64,6 +64,8 @@ export async function initDatabase() {
             rules TEXT,
             "coverImage" TEXT,
             tags TEXT, -- JSON Array
+            lat DECIMAL,
+            lng DECIMAL,
             status VARCHAR(50) DEFAULT 'active',
             "hostId" VARCHAR(255) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -151,7 +153,15 @@ export async function initDatabase() {
         )
     `);
 
-    // 9. Create Blocks Table
+    // Migration: Add lat and lng to gatherings if they don't exist
+    try {
+        await query(`ALTER TABLE gatherings ADD COLUMN lat DECIMAL`);
+    } catch(e) { /* Ignore if exists */ }
+    try {
+        await query(`ALTER TABLE gatherings ADD COLUMN lng DECIMAL`);
+    } catch(e) { /* Ignore if exists */ }
+
+    // Dummy Data Checks Table
     await query(`
         CREATE TABLE IF NOT EXISTS blocks (
             blocker_id VARCHAR(255),

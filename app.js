@@ -1008,8 +1008,7 @@ function createEventCardHTML(event) {
         <div class="card-body">
             <div class="card-meta">
                 <span>${event.category}</span>
-                <span>•</span>
-                <span>${event.distance}</span>
+                ${event.distance ? `<span>•</span> <span><i data-lucide="navigation" style="width:12px; height:12px; display:inline; vertical-align:text-bottom;"></i> ${event.distance} km away</span>` : ''}
             </div>
             <h3 class="card-title">${event.title}</h3>
             
@@ -1142,6 +1141,7 @@ async function renderExploreView(container) {
         <div class="filters-bar" id="explore-category-scroll"></div>
 
         <div class="filters-bar" id="explore-pills-bar" style="border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 20px;">
+            <span class="filter-pill ${activeFilters.nearMe ? 'active' : ''}" data-filter="nearMe" onclick="toggleNearMeFilter()">📍 Near Me</span>
             <span class="filter-pill ${activeFilters.date === 'today' ? 'active' : ''}" data-filter="today" onclick="toggleDateFilter('today')">Today</span>
             <span class="filter-pill ${activeFilters.date === 'tomorrow' ? 'active' : ''}" data-filter="tomorrow" onclick="toggleDateFilter('tomorrow')">Tomorrow</span>
             <span class="filter-pill ${activeFilters.date === 'weekend' ? 'active' : ''}" data-filter="weekend" onclick="toggleDateFilter('weekend')">Weekend</span>
@@ -1149,6 +1149,12 @@ async function renderExploreView(container) {
             <span class="filter-pill ${activeFilters.age18 ? 'active' : ''}" data-filter="age18" onclick="toggleToggleFilter('age18')">18+ Age</span>
             <span class="filter-pill ${activeFilters.smallGroup ? 'active' : ''}" data-filter="smallGroup" onclick="toggleToggleFilter('smallGroup')">Small Group (<10)</span>
         </div>
+
+        <div id="near-me-range-container" style="display: ${activeFilters.nearMe ? 'flex' : 'none'}; align-items:center; gap:12px; margin-bottom:20px; background:var(--surface); padding:10px 16px; border-radius:12px; border:1px solid var(--border);">
+            <label style="font-size:13px; font-weight:600; min-width:120px;">Within: <span id="near-me-range-val">${activeFilters.radiusKm}</span> km</label>
+            <input type="range" id="near-me-range" min="1" max="100" value="${activeFilters.radiusKm}" oninput="document.getElementById('near-me-range-val').innerText=this.value" onchange="updateNearMeRange(this.value)" style="flex:1;">
+        </div>
+
 
         <div class="grid-cards" id="explore-results-grid">
             ${state.gatherings && state.gatherings.length > 0 ? '' : '<div class="skeleton skeleton-card" style="grid-column: 1/-1;"></div>'}
@@ -1472,6 +1478,9 @@ window.submitComment = async function(id) {
 // CREATE GATHERING
 // ----------------------------------------------------
 
+window.createEventLat = null;
+window.createEventLng = null;
+
 async function useCurrentLocationForEvent() {
     const locInput = document.getElementById('create-location');
     if (!navigator.geolocation) {
@@ -1484,6 +1493,8 @@ async function useCurrentLocationForEvent() {
     navigator.geolocation.getCurrentPosition(async (position) => {
         try {
             const { latitude, longitude } = position.coords;
+            window.createEventLat = latitude;
+            window.createEventLng = longitude;
             const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`);
             const data = await res.json();
             
@@ -1678,7 +1689,9 @@ window.handleCreateGatheringSubmit = async function(event) {
         itemsToBring: document.getElementById("create-items").value,
         rules: document.getElementById("create-rules").value,
         public: !document.getElementById("create-approval-required").checked,
-        tags: document.getElementById("create-tags").value.split(",").map(t => t.trim()).filter(t => t.length > 0)
+        tags: document.getElementById("create-tags").value.split(",").map(t => t.trim()).filter(t => t.length > 0),
+        lat: window.createEventLat || null,
+        lng: window.createEventLng || null
     };
 
     try {
@@ -2668,7 +2681,11 @@ let activeFilters = {
     free: false,
     public: null,
     age18: false,
-    smallGroup: false
+    smallGroup: false,
+    nearMe: false,
+    radiusKm: 10,
+    nearMeLat: null,
+    nearMeLng: null
 };
 
 function renderExploreCategoryFilters() {
@@ -2730,6 +2747,18 @@ function renderFilteredGatheringsLocally() {
     if (activeFilters.smallGroup) {
         list = list.filter(g => g.maxAttendees <= 10);
     }
+    if (activeFilters.nearMe && activeFilters.nearMeLat !== null) {
+        list = list.filter(g => {
+            if (g.lat == null || g.lng == null) return false;
+            const dist = haversineDist(activeFilters.nearMeLat, activeFilters.nearMeLng, g.lat, g.lng);
+            if (dist <= activeFilters.radiusKm) {
+                g.distance = dist.toFixed(1);
+                return true;
+            }
+            return false;
+        });
+        list.sort((a,b) => parseFloat(a.distance) - parseFloat(b.distance));
+    }
     
     grid.innerHTML = "";
     if (list.length === 0) {
@@ -2774,6 +2803,46 @@ window.toggleToggleFilter = function(key) {
     renderExploreResults();
 };
 
+window.toggleNearMeFilter = function() {
+    if (!activeFilters.nearMe) {
+        if (!navigator.geolocation) {
+            showPopMessage("Geolocation is not supported by your browser", "danger");
+            return;
+        }
+        showPopMessage("Locating...", "info");
+        navigator.geolocation.getCurrentPosition((pos) => {
+            activeFilters.nearMe = true;
+            activeFilters.nearMeLat = pos.coords.latitude;
+            activeFilters.nearMeLng = pos.coords.longitude;
+            const pill = document.querySelector('.filter-pill[data-filter="nearMe"]');
+            if(pill) pill.classList.add("active");
+            const rangeCont = document.getElementById("near-me-range-container");
+            if(rangeCont) rangeCont.style.display = "flex";
+            renderFilteredGatheringsLocally();
+            renderExploreResults();
+        }, () => {
+            showPopMessage("Could not get location", "danger");
+        });
+    } else {
+        activeFilters.nearMe = false;
+        activeFilters.nearMeLat = null;
+        activeFilters.nearMeLng = null;
+        const pill = document.querySelector('.filter-pill[data-filter="nearMe"]');
+        if(pill) pill.classList.remove("active");
+        const rangeCont = document.getElementById("near-me-range-container");
+        if(rangeCont) rangeCont.style.display = "none";
+        renderFilteredGatheringsLocally();
+        renderExploreResults();
+    }
+};
+
+window.updateNearMeRange = function(val) {
+    activeFilters.radiusKm = parseInt(val);
+    renderFilteredGatheringsLocally();
+    renderExploreResults();
+};
+
+
 async function renderExploreResults() {
     const grid = document.getElementById("explore-results-grid");
     if (!grid) return;
@@ -2786,10 +2855,15 @@ async function renderExploreResults() {
     if (activeFilters.public !== null) params.append("public", activeFilters.public);
     if (activeFilters.age18) params.append("age18", "true");
     if (activeFilters.smallGroup) params.append("smallGroup", "true");
+    if (activeFilters.nearMe && activeFilters.nearMeLat !== null) {
+        params.append("nearMeLat", activeFilters.nearMeLat);
+        params.append("nearMeLng", activeFilters.nearMeLng);
+        params.append("radiusKm", activeFilters.radiusKm);
+    }
 
     try {
         const list = await apiFetch(`/gatherings?${params.toString()}`);
-        if (!state.searchQuery && !activeFilters.category && !activeFilters.date && activeFilters.public === null && !activeFilters.age18 && !activeFilters.smallGroup) {
+        if (!state.searchQuery && !activeFilters.category && !activeFilters.date && activeFilters.public === null && !activeFilters.age18 && !activeFilters.smallGroup && !activeFilters.nearMe) {
             state.gatherings = list;
         }
         grid.innerHTML = "";
